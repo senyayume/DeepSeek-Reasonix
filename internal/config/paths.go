@@ -447,6 +447,33 @@ func StatsDir() string {
 	return filepath.Join(dir, "stats")
 }
 
+// GlobalWorkspaceRoot is the Desktop's real, user-editable global workspace.
+func GlobalWorkspaceRoot() string {
+	home := reasonixHomeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "global-workspace")
+}
+
+// IsGlobalWorkspaceRoot reports whether root is the Desktop global workspace.
+func IsGlobalWorkspaceRoot(root string) bool {
+	globalRoot := GlobalWorkspaceRoot()
+	if strings.TrimSpace(root) == "" || globalRoot == "" {
+		return false
+	}
+	if runtimeGOOS == "windows" {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+		if abs, err := filepath.Abs(globalRoot); err == nil {
+			globalRoot = abs
+		}
+		return strings.EqualFold(filepath.Clean(root), filepath.Clean(globalRoot))
+	}
+	return samePath(root, globalRoot)
+}
+
 // ProjectSessionDir is the per-workspace session directory the desktop sidebar
 // lists: <state root>/projects/<slug>/sessions. Empty when either the state root
 // or workspaceRoot doesn't resolve.
@@ -458,6 +485,9 @@ func ProjectSessionDir(workspaceRoot string) string {
 	}
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
+	}
+	if IsGlobalWorkspaceRoot(root) {
+		return SessionDir()
 	}
 	return filepath.Join(base, "projects", WorkspaceSlug(root), "sessions")
 }

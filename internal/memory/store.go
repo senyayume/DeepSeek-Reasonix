@@ -110,10 +110,11 @@ func StoreFor(userDir, cwd string) Store {
 	if userDir == "" {
 		return Store{}
 	}
-	return Store{
-		Dir:       filepath.Join(userDir, "projects", config.WorkspaceSlug(absOf(cwd)), "memory"),
-		GlobalDir: filepath.Join(userDir, "memory", "global"),
+	dir := filepath.Join(userDir, "projects", config.WorkspaceSlug(absOf(cwd)), "memory")
+	if config.IsGlobalWorkspaceRoot(cwd) {
+		dir = filepath.Join(userDir, "memory")
 	}
+	return Store{Dir: dir, GlobalDir: filepath.Join(userDir, "memory", "global")}
 }
 
 // DirFor returns the directory for an explicit fact scope. When GlobalDir is

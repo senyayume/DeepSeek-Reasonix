@@ -3876,10 +3876,10 @@ func (a *App) buildTabControllerWithContextCore(tab *WorkspaceTab, loadedSession
 	}
 	topicID := strings.TrimSpace(tabTopicID)
 	pinnedPath, hasPinnedPath := pinnedTabSessionPathForBuild(tabScope, tabWorkspaceRoot, sessionDir, tabSessionPath)
+	rejectedCleanupPendingKey := ""
 	if hasPinnedPath && agent.IsCleanupPending(pinnedPath) {
-		// Boot reconciliation may finish the pending deletion before the later
-		// resume step. Clear the local candidate now so the disappeared path is
-		// not mistaken for a deliberate empty placeholder afterward.
+		// Remember the key: reconcile may delete the file before the resume step.
+		rejectedCleanupPendingKey = sessionRuntimeKey(pinnedPath)
 		hasPinnedPath = false
 		pinnedPath = ""
 	}
@@ -4032,7 +4032,7 @@ func (a *App) buildTabControllerWithContextCore(tab *WorkspaceTab, loadedSession
 		// Prefer the exact session file persisted for this tab. Topic lookup is a
 		// compatibility fallback for older desktop-tabs.json files that only stored
 		// topicId and could pick the wrong session when one topic had multiple files.
-		if loaded, pinnedPath, ok, loadErr := loadPinnedTabSessionWithPreload(dir, tabSessionPath, loadedSession); loadErr != nil {
+		if loaded, pinnedPath, ok, loadErr := loadPinnedTabSessionWithPreload(dir, tabSessionPath, loadedSession, rejectedCleanupPendingKey); loadErr != nil {
 			resumeLoadErr = loadErr
 		} else if ok {
 			path = pinnedPath
@@ -7606,7 +7606,7 @@ func newTopicID() string {
 }
 
 func globalWorkspaceRoot() string {
-	return filepath.Join(desktopConfigDir(), "global-workspace")
+	return config.GlobalWorkspaceRoot()
 }
 
 func ensureGlobalWorkspaceRoot() (string, error) {
@@ -7629,7 +7629,11 @@ func loadPinnedTabSession(dir, sessionPath string) (*agent.Session, string, bool
 	return loadPinnedTabSessionWithPreloadAndMigrationFallback(dir, sessionPath, loadedTabSession{}, true)
 }
 
-func loadPinnedTabSessionWithPreload(dir, sessionPath string, preloaded loadedTabSession) (*agent.Session, string, bool, error) {
+func loadPinnedTabSessionWithPreload(dir, sessionPath string, preloaded loadedTabSession, rejectedKey string) (*agent.Session, string, bool, error) {
+	// The reconcile may have deleted the file since the early check; never rebind it.
+	if rejectedKey == sessionRuntimeKey(sessionPath) {
+		return nil, "", false, nil
+	}
 	return loadPinnedTabSessionWithPreloadAndMigrationFallback(dir, sessionPath, preloaded, false)
 }
 

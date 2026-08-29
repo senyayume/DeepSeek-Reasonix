@@ -537,6 +537,17 @@ func TestListProjectTopicsUsesAvailableProjectionBeforeEveryGlobalDirectoryIsSca
 	if err := catalog.ReconcileDirectory(context.Background(), sessioncatalog.DirectoryTarget{Path: legacy, Scope: "global"}); err != nil {
 		t.Fatal(err)
 	}
+	// A second global directory survives only as a restored legacy-slug tab
+	// from an in-place upgrade (no migrator); register one so availability
+	// still reports a pending global directory.
+	restoredDir := filepath.Join(filepath.Dir(legacy), "projects", config.WorkspaceSlug(globalWorkspaceRoot()), "sessions")
+	if err := os.MkdirAll(restoredDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restored := writeLegacySession(t, restoredDir, "restored.jsonl", "restored global history", time.Now())
+	tab := app.createTabEntryWithID("global", globalTabWorkspaceRoot(), "", "tab_restored_legacy")
+	tab.SessionPath = restored
+	app.tabs[tab.ID] = tab
 
 	page, err := app.ListProjectTopics(ProjectTopicPageRequest{Scope: "global", Limit: 50})
 	if err != nil {
@@ -590,6 +601,16 @@ func TestListProjectTopicsPaginatesMetadataWhileCatalogIsPartiallyAvailable(t *t
 	if err := catalog.ReconcileDirectory(context.Background(), sessioncatalog.DirectoryTarget{Path: legacy, Scope: "global"}); err != nil {
 		t.Fatal(err)
 	}
+	// Same restored-tab setup as the partial-projection test: the legacy
+	// global-workspace slug directory stays a pending second global target.
+	restoredDir := filepath.Join(filepath.Dir(legacy), "projects", config.WorkspaceSlug(globalWorkspaceRoot()), "sessions")
+	if err := os.MkdirAll(restoredDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restored := writeLegacySession(t, restoredDir, "restored.jsonl", "restored global history", time.Now())
+	tab := app.createTabEntryWithID("global", globalTabWorkspaceRoot(), "", "tab_restored_legacy")
+	tab.SessionPath = restored
+	app.tabs[tab.ID] = tab
 
 	first, err := app.ListProjectTopics(ProjectTopicPageRequest{Scope: "global", Limit: 2})
 	if err != nil {
