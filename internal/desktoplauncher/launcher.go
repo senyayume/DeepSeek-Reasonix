@@ -54,6 +54,10 @@ func Run(args []string, buildVersion string) int {
 	cmd := exec.Command(desktopPath, StripLegacyLaunchArgs(args)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Dir = installRoot
+	if err := configurePortableDesktopCommand(cmd, runtime.GOOS, buildVersion, os.Getenv("REASONIX_HOME"), installRoot, os.Environ()); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
 	if DetachByDefault() {
 		if err := cmd.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
