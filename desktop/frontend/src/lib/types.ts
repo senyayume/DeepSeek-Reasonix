@@ -575,29 +575,13 @@ export interface ProjectNode extends RemoteProjectNodeFields {
   recoveryBranchCount?: number;
   recoveryUnresolvedCount?: number;
   recoveryCleanupEligibleCount?: number;
-  recoveryCopyCount?: number; // folded recovery copies behind this row (badge only)
+  recoveryCopyCount?: number; // Deprecated: ordinary trees hide physical copies.
   isolatedWorktree?: boolean;
   runtimeOnly?: boolean;
   children?: ProjectNode[];
 }
 
-export interface RecoveryLineageMember {
-  path: string;
-  role: "normal" | "covered_copy" | "adopted" | "preferred" | "diverged" | string;
-  canonical: boolean;
-  turns: number;
-  open: boolean;
-  running: boolean;
-}
-
-export interface RecoveryLineageView {
-  groupId: string;
-  state: string;
-  branchCount: number;
-  unresolved: number;
-  cleanupEligible: number;
-  members: RecoveryLineageMember[];
-}
+export type { RecoveryLineageMember, RecoveryLineageView } from "./sessionRecoveryTypes";
 
 export interface RecoveryCleanupRequest {
   scope: string;
@@ -1698,6 +1682,7 @@ export interface ProviderView {
   headers?: Record<string, string> | null; // optional extra request headers for compatible gateways
   extraBody?: Record<string, unknown> | null; // optional extra top-level request body fields for compatible gateways
   authHeader?: boolean; // Anthropic-compatible: send Authorization: Bearer instead of x-api-key
+  noProxy?: boolean; // reach this provider's endpoint directly, bypassing the configured/system proxy
   keySet: boolean; // the env var currently resolves to a value
   requiresKey?: boolean; // false for explicit no-auth providers
   configured?: boolean; // selectable: key is set or no key is required

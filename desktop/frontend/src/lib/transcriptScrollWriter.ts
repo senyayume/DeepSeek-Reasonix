@@ -1,6 +1,7 @@
 import type { RefObject } from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
 import type { TranscriptScrollMode } from "./transcriptScrollArbiter";
+import { nativeTranscriptDistanceFromBottom } from "./transcriptScrollGeometry";
 import { noteTranscriptScrollWrite } from "./transcriptScrollProbe";
 
 export type TranscriptScrollWriterRequest = {
@@ -65,8 +66,7 @@ export function createTranscriptScrollWriter({
     else if (request.expectedOwnershipEpoch !== epoch) rejectedReason = "stale-ownership-epoch";
     else if (request.expectedGeometryRevision !== revision) rejectedReason = "stale-geometry-revision";
     else if (request.operation === "scrollToIndex" ? request.index === undefined : request.top === undefined) rejectedReason = "invalid-target";
-    const phase = request.phase ?? request.operation;
-    const acceptanceKey = `${request.owner}:${epoch}:${revision}:${phase}`;
+    const acceptanceKey = `${request.owner}:${epoch}:${revision}:${request.settleFrame ?? request.phase ?? request.operation}`;
     if (!rejectedReason && accepted.has(acceptanceKey)) rejectedReason = "duplicate-revision-phase";
 
     sequence += 1;
@@ -80,7 +80,7 @@ export function createTranscriptScrollWriter({
       scrollTop: element?.scrollTop,
       scrollHeight: element?.scrollHeight,
       clientHeight: element?.clientHeight,
-      bottomDistance: element ? element.scrollHeight - element.scrollTop - element.clientHeight : undefined,
+      bottomDistance: element ? nativeTranscriptDistanceFromBottom(element) : undefined,
       mode: modeRef.current,
       sequence,
       generation,

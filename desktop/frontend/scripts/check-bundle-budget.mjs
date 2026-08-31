@@ -151,7 +151,23 @@ console.log("\nbundle budgets");
 // Generic elicitation validation adds field-specific localized accessibility
 // copy to the English startup dictionary. The interaction code and CSS remain
 // lazy; the measured path is 455.437 KiB. Retain 0.163 KiB of headroom.
-const initialJSBudgetKiB = process.env.REASONIX_CHANNEL === "test" ? 455.6 : 455.6;
+// Stream-failure visibility (#9560) adds the last-discard reason and one
+// terminal-notice dedupe flag, while provider no_proxy copy now states the
+// custom-proxy precedence. The merged path measures 455.9 KiB; retain 0.1 KiB
+// of bounded build/toolchain headroom.
+// Exhausted tail repair now releases ownership so jump-bottom remains usable
+// after a stranded native WebView extent. The WebView2 reachable-tail clamp
+// then absorbs a second post-quiet extent without an unbounded write loop.
+// The combined path measures 456.316 KiB; retain 0.084 KiB with the smallest
+// one-decimal ratchet.
+// The generation-bound history-prepend lease adds stable-key reader anchoring,
+// full mounted coverage, and one final arbiter-owned correction. The measured
+// path is 457.406 KiB after extracting the lease owner to satisfy repolint.
+// Latest-base transcript settle ownership measures 457.518 KiB with this UX;
+// isolated conversation forks and their extracted browser mock adapter bring
+// the combined tree to 458.158 KiB. Retain 0.042 KiB with the smallest
+// one-decimal ratchet.
+const initialJSBudgetKiB = process.env.REASONIX_CHANNEL === "test" ? 458.2 : 458.2;
 assertBudget("initial JavaScript gzip", initialJSGzip, initialJSBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk gzip", largestInitialJS, 280 * 1024);
 // Render-blocking CSS is intentionally absent: styles.css loads deferred via
@@ -202,7 +218,11 @@ for (const path of localeChunks) {
   // Generic schema validation adds complete field-error, privacy, and safe-
   // fallback copy. Measured chunks are 58.574 KiB zh and 59.368 KiB zh-TW;
   // retain roughly 0.13 KiB of platform headroom for each.
-  const budget = name.startsWith("zh-TW-") ? 59.5 * 1024 : 58.7 * 1024;
+  // Stream-failure diagnostics add five strings per dialect. Together with the
+  // reachable-tail recovery copy, the merged chunks measure 58.923 KiB zh and
+  // 59.710 KiB zh-TW. The isolated-fork guidance brings the measured chunks
+  // to 59.1 KiB zh and 59.9 KiB zh-TW; retain a narrow one-decimal ratchet.
+  const budget = name.startsWith("zh-TW-") ? 60.0 * 1024 : 59.2 * 1024;
   assertBudget(`${name} gzip`, gzipBytes(path), budget);
 }
 
@@ -261,6 +281,17 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // The off-flow composer measurement mirror adds 0.472 KiB raw while removing
 // live-textarea layout mutation. The merged path measures 2444.806 KiB; retain
 // 0.194 KiB of bounded toolchain headroom without widening gzip/chunk gates.
-const rawInitialBudgetKiB = process.env.REASONIX_CHANNEL === "test" ? 2_445.0 : 2_445.0;
+// Stream-failure visibility and corrected proxy guidance bring the merged path
+// to 2446.6 KiB; retain the smallest existing decimal ratchet.
+// The stranded-tail recovery transition plus the WebView2 reachable-tail clamp
+// bring the measured initial payload to 2447.953 KiB. Retain 0.047 KiB with
+// the smallest one-decimal ratchet.
+// The extracted history-prepend owner and compact session-version host measure
+// 2452.7 KiB together; the recovery coordinator and dialog remain lazy. Retain
+// the smallest one-decimal headroom without widening unrelated chunk ceilings.
+// Latest-base transcript settle ownership brings the measured path to
+// 2452.773 KiB; isolated conversation forks bring the combined tree to
+// 2454.679 KiB. Retain 0.021 KiB with the smallest one-decimal ratchet.
+const rawInitialBudgetKiB = process.env.REASONIX_CHANNEL === "test" ? 2_454.7 : 2_454.7;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);

@@ -35,8 +35,8 @@ import { clearLegacyLangPref, normalizeLangPref, readLegacyLangPref, t, useI18n,
 import { useActiveRemoteSession } from "./lib/useRemoteSession";
 import { useRemoteTabOpened } from "./lib/useRemoteTabOpened";
 import { renameCurrentRemoteSession } from "./lib/remoteSessionActions";
-import { localizedNoticeText, useController, type HistoryLoadTrigger, type Item, type LiveStream } from "./lib/useController";
-import { app, onEvent, onProjectTreeChanged, onReady, onRemoteForwards, onRemoteServer, onRemoteStatus, onRuntimeRebuilt, onSessionRecovered, openExternal } from "./lib/bridge";
+import { localizedNoticeText, useController, type HistoryLoadTrigger, type Item } from "./lib/useController";
+import { app, onEvent, onProjectTreeChanged, onReady, onRemoteForwards, onRemoteServer, onRemoteStatus, onRuntimeRebuilt, openExternal } from "./lib/bridge";
 import { useConfigLoadWarnings } from "./lib/useConfigLoadWarnings";
 import { generativeMusic, isGenerativeMusicEnabled } from "./lib/generative-music";
 import { clearAttentionChimeKeys, playAttentionChime, playSuccessChime, shouldPlayAttentionChimeForEvent } from "./lib/sound";
@@ -110,6 +110,7 @@ import {
   type WireCompletionSummary,
   type WorkspaceConflictView,
 } from "./lib/types";
+import { requestSessionVersions } from "./lib/sessionRecoveryVersionHostBridge";
 import type { WorkspaceVerificationRevealRequest } from "./components/WorkspacePanel";
 import type { InvocationMetadataMap, StructuredInvocationSubmit } from "./lib/invocationDisplay";
 import type { RewindUndoState } from "./lib/rewindTypes";
@@ -284,6 +285,7 @@ function NoticePreviewPanel() {
 const TranscriptSelectionMenu = lazy(() => import("./components/TranscriptSelectionMenu").then((module) => ({ default: module.TranscriptSelectionMenu })));
 const ContextPanel = lazy(() => import("./components/ContextPanel").then((module) => ({ default: module.ContextPanel })));
 const HistoryPanel = lazy(() => import("./components/HistoryPanel").then((module) => ({ default: module.HistoryPanel })));
+const SessionRecoveryVersionsHost = lazy(() => import("./components/SessionRecoveryVersionsHost").then((module) => ({ default: module.SessionRecoveryVersionsHost })));
 const HeartbeatView = lazy(() => import("./custom/features/heartbeat/HeartbeatPanel").then((module) => ({ default: module.HeartbeatView })));
 const SettingsPanel = lazy(() => import("./components/SettingsPanelEntry").then((module) => ({ default: module.SettingsPanel })));
 const RemotePanel = lazy(() => import("./components/RemotePanel").then((module) => ({ default: module.RemotePanel })));
@@ -957,81 +959,6 @@ function workspaceDisplayName(path?: string): string {
   if (!path) return "";
   const parts = path.split(/[/\\]/).filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : path;
-}
-
-function materializeLiveItems(items: Item[], live?: LiveStream): Item[] {
-  if (!live) return items;
-  return items.map((item) => {
-    if (item.kind !== "assistant" || item.id !== live.id) return item;
-    return { ...item, text: live.text, reasoning: live.reasoning, streaming: true };
-  });
-}
-
-function fence(label: string, value: string): string {
-  if (!value.trim()) return "";
-  const fenceToken = value.includes("```") ? "````" : "```";
-  return `${label}\n${fenceToken}\n${value.trim()}\n${fenceToken}`;
-}
-
-function sessionItemsToMarkdown(title: string, items: Item[], live?: LiveStream): string {
-  const lines: string[] = [`# ${title.trim() || "Reasonix session"}`, ""];
-  for (const item of materializeLiveItems(items, live)) {
-    switch (item.kind) {
-      case "user":
-        lines.push("## User", "", item.text.trim(), "");
-        break;
-      case "assistant":
-        lines.push("## Assistant");
-        if (item.reasoning.trim()) {
-          lines.push("", "### Reasoning", "", item.reasoning.trim());
-        }
-        if (item.text.trim()) {
-          lines.push("", item.text.trim());
-        }
-        lines.push("");
-        break;
-      case "tool":
-        lines.push(`### Tool: ${item.name}`);
-        if (item.args.trim()) lines.push("", fence("Args", item.args));
-        if (item.output?.trim()) lines.push("", fence("Output", item.output));
-        if (item.error?.trim()) lines.push("", fence("Error", item.error));
-        lines.push("");
-        break;
-      case "phase":
-        lines.push(`### Phase`, "", item.text.trim(), "");
-        break;
-      case "notice":
-        lines.push(`### ${item.level === "warn" ? "Warning" : "Notice"}`, "", item.text.trim(), "");
-        if (item.detail?.trim()) {
-          lines.push("Details:", "", item.detail.trim(), "");
-        }
-        break;
-      case "compaction":
-        lines.push("### Context Compaction", "");
-        if (item.pending) {
-          lines.push("Compaction pending.");
-        } else {
-          lines.push(`Messages: ${item.messages}`);
-          if (item.trigger) lines.push(`Trigger: ${item.trigger}`);
-          if (item.summary.trim()) lines.push("", item.summary.trim());
-        }
-        lines.push("");
-        break;
-    }
-  }
-  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
-}
-
-function sessionItemsToJson(title: string, items: Item[], live?: LiveStream): string {
-  return JSON.stringify(
-    {
-      title,
-      exportedAt: new Date().toISOString(),
-      items: materializeLiveItems(items, live),
-    },
-    null,
-    2,
-  );
 }
 
 function safeFilename(name: string): string {
@@ -2140,11 +2067,11 @@ export default function App() {
     applyThemeScene(sessionHasContent ? "task" : "home");
   }, [sessionHasContent]);
   const getSessionMarkdown = useCallback(
-    () => sessionItemsToMarkdown(sessionTitle, exportItems, exportLive),
+    async () => (await import("./lib/sessionExportData")).sessionItemsToMarkdown(sessionTitle, exportItems, exportLive),
     [exportItems, exportLive, sessionTitle],
   );
   const getSessionJson = useCallback(
-    () => sessionItemsToJson(sessionTitle, exportItems, exportLive),
+    async () => (await import("./lib/sessionExportData")).sessionItemsToJson(sessionTitle, exportItems, exportLive),
     [exportItems, exportLive, sessionTitle],
   );
 
@@ -2166,21 +2093,21 @@ export default function App() {
         if (format === "json") {
           const path = await app.PickExportFile(`${base}.json`, "application/json");
           if (path) {
-            await app.SaveExportFile(path, getSessionJson(), false);
+            await app.SaveExportFile(path, await getSessionJson(), false);
             showToast(t("topicBar.exportSuccess", { count: 1 }), "info");
           }
         } else if (format === "pdf") {
           const path = await app.PickExportFile(`${base}.pdf`, "application/pdf");
           if (!path) return;
           const { blobToBase64, renderSessionPdfBlob } = await import("./lib/sessionExport");
-          const blob = await renderSessionPdfBlob(getSessionMarkdown(), sessionTitle);
+          const blob = await renderSessionPdfBlob(await getSessionMarkdown(), sessionTitle);
           await app.SaveExportFile(path, await blobToBase64(blob), true);
           showToast(t("topicBar.exportSuccess", { count: 1 }), "info");
         } else if (format === "image") {
           const path = await app.PickExportFile(`${base}.png`, "image/png");
           if (!path) return;
           const { renderSessionImageBase64Payloads } = await import("./lib/sessionExport");
-          const payloads = await renderSessionImageBase64Payloads(getSessionMarkdown());
+          const payloads = await renderSessionImageBase64Payloads(await getSessionMarkdown());
           await app.SaveExportImageFiles(path, payloads);
           showToast(
             payloads.length > 1
@@ -2191,7 +2118,7 @@ export default function App() {
         } else {
           const path = await app.PickExportFile(`${base}.md`, "text/markdown");
           if (path) {
-            await app.SaveExportFile(path, getSessionMarkdown(), false);
+            await app.SaveExportFile(path, await getSessionMarkdown(), false);
             showToast(t("topicBar.exportSuccess", { count: 1 }), "info");
           }
         }
@@ -3908,12 +3835,6 @@ export default function App() {
     enqueueNavigation({ kind: "blank", scope, workspaceRoot: scope === "project" ? workspaceRoot : "" }),
   [enqueueNavigation]);
 
-  useEffect(() => onSessionRecovered(() => {
-    recordFrontendDiagnostic("runtime", "session.recovered", { status: "ok" });
-    setProjectRevision((value) => value + 1);
-    void refreshTabMetas(undefined, { afterMutation: true });
-  }), [refreshTabMetas]);
-
   const handleNewTab = useCallback(async () => {
     closeTransientOverlays();
     setSidebarImDetailConnectionId("");
@@ -3937,6 +3858,15 @@ export default function App() {
     if (state.running && !singleSurfaceLayout) return Promise.resolve();
     return enqueueNavigation({ kind: "resume-session", session });
   }, [enqueueNavigation, singleSurfaceLayout, state.running]);
+
+  const onRecoveryCreated = useCallback(() => {
+    setProjectRevision((value) => value + 1);
+    void refreshTabMetas(undefined, { afterMutation: true });
+  }, [refreshTabMetas]);
+  const onRecoveryLineageChanged = useCallback(() => {
+    setProjectRevision((value) => value + 1);
+    void refreshHistoryView();
+  }, [refreshHistoryView]);
 
   const openTaskMonitorSession = useCallback(async (tabID: string, taskID: string): Promise<boolean> => {
     if (state.running && !singleSurfaceLayout) {
@@ -4155,24 +4085,11 @@ export default function App() {
     },
     [state.running, deleteSession, refreshHistoryView],
   );
-  const onDeleteManySessions = useCallback(
-    async (paths: string[]) => {
+  const onRenameHistorySession = useCallback(
+    async (session: SessionMeta, title: string) => {
       if (state.running) return;
-      const uniquePaths = Array.from(new Set(paths));
-      for (const path of uniquePaths) {
-        // Best effort per path: one locked/missing file must not abandon the
-        // rest of the sweep. The guarded backend method revalidates actual
-        // branch and parent content before moving anything.
-        await app.DeleteRecoveryCopy(path).catch(() => undefined);
-      }
-      await refreshHistoryView();
-    },
-    [state.running, refreshHistoryView],
-  );
-  const onRenameSession = useCallback(
-    async (path: string, title: string) => {
-      if (state.running) return;
-      await renameSession(path, title);
+      if (session.topicId) await app.RenameTopic(session.topicId, title);
+      else await renameSession(session.path, title);
       const sessions = await listSessions();
       setHistView((cur) =>
         cur === null
@@ -4211,20 +4128,6 @@ export default function App() {
     },
     [purgeTrashedSession, listTrashedSessions],
   );
-  const onPurgeRecoveryCopies = useCallback(
-    async (paths: string[]) => {
-      const uniquePaths = Array.from(new Set(paths));
-      for (const path of uniquePaths) {
-        // Permanent copy cleanup must not trust the list result: the backend
-        // rechecks the trashed transcript and its live parent for every path.
-        await app.PurgeRecoveryCopy(path).catch(() => undefined);
-      }
-      const trashed = await listTrashedSessions();
-      setHistView((cur) => (cur === null ? null : { kind: "trash", sessions: trashed }));
-    },
-    [listTrashedSessions],
-  );
-
   // Workspace: open the folder chooser and switch projects. The hook resets the
   // transcript and refreshes meta on a pick. A cancel is a no-op.
   const switchFolder = useCallback(async (path?: string) => {
@@ -5316,6 +5219,7 @@ export default function App() {
                 <Suspense fallback={null}>
                   <ContextPanel
                     tabId={remoteSurfaceActive ? undefined : activeTabId}
+                    items={exportItems}
                     context={visibleRuntimeState.context}
                     usage={visibleRuntimeState.usage}
                     sessionTokens={visibleRuntimeState.sessionTokens}
@@ -5461,16 +5365,24 @@ export default function App() {
             onResume={onResumeSession}
             onPreview={previewSession}
             onDelete={onDeleteSession}
-            onRename={onRenameSession}
+            onRename={onRenameHistorySession}
             onRestore={onRestoreTrashedSession}
             onPurge={onPurgeTrashedSession}
             onPurgeAll={onPurgeAllTrashedSessions}
-            onPurgeRecoveryCopies={onPurgeRecoveryCopies}
-            onDeleteMany={onDeleteManySessions}
+            onInspectVersions={requestSessionVersions}
             onClose={closeHistory}
           />
         </Suspense>
       )}
+
+      <Suspense fallback={null}>
+        <SessionRecoveryVersionsHost
+          sessions={histView?.sessions}
+          onResumeSession={onResumeSession}
+          onRecoveryCreated={onRecoveryCreated}
+          onLineageChanged={onRecoveryLineageChanged}
+        />
+      </Suspense>
 
       {settingsTarget !== null && (
         <Suspense fallback={null}>
