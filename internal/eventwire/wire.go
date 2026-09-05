@@ -77,6 +77,25 @@ type CompletionSummary struct {
 	Attention          bool     `json:"attention"`
 }
 
+func toWireCompletionSummary(c *event.CompletionSummaryInfo) *CompletionSummary {
+	if c == nil {
+		return nil
+	}
+	return &CompletionSummary{
+		Preset:             c.Preset,
+		Verdict:            c.Verdict,
+		Mutations:          c.Mutations,
+		ChecksPassed:       c.ChecksPassed,
+		ChecksFailed:       c.ChecksFailed,
+		ChecksSuppressed:   c.ChecksSuppressed,
+		Review:             c.Review,
+		GapKinds:           append([]string(nil), c.GapKinds...),
+		ConstraintDegraded: c.ConstraintDegraded,
+		Floor:              c.Floor,
+		Attention:          c.Attention,
+	}
+}
+
 type WorkspaceChanged struct {
 	Revisions  WorkspaceRevision     `json:"revisions"`
 	Changes    []WorkspacePathChange `json:"changes"`
@@ -128,6 +147,8 @@ func ToWire(e event.Event) Event {
 			ArgChars: e.Tool.ArgChars, Refreshed: e.Tool.Refreshed,
 			ParentID: e.Tool.ParentID, AttemptID: e.Tool.AttemptID,
 			Diff: e.Tool.Diff, Added: e.Tool.Added, Removed: e.Tool.Removed,
+			SubagentRef: e.Tool.SubagentRef, SubagentStatus: e.Tool.SubagentStatus,
+			SubagentErrorCode: e.Tool.SubagentErrorCode, SubagentRetryable: e.Tool.SubagentRetryable,
 		}
 		if e.Tool.Profile != nil {
 			wt.Profile = &Profile{Model: e.Tool.Profile.Model, Effort: e.Tool.Profile.Effort}
@@ -207,21 +228,7 @@ func ToWire(e event.Event) Event {
 			w.Phase = e.Text
 		}
 	case event.CompletionSummary:
-		if c := e.Completion; c != nil {
-			w.Completion = &CompletionSummary{
-				Preset:             c.Preset,
-				Verdict:            c.Verdict,
-				Mutations:          c.Mutations,
-				ChecksPassed:       c.ChecksPassed,
-				ChecksFailed:       c.ChecksFailed,
-				ChecksSuppressed:   c.ChecksSuppressed,
-				Review:             c.Review,
-				GapKinds:           append([]string(nil), c.GapKinds...),
-				ConstraintDegraded: c.ConstraintDegraded,
-				Floor:              c.Floor,
-				Attention:          c.Attention,
-			}
-		}
+		w.Completion = toWireCompletionSummary(e.Completion)
 	}
 	return w
 }
@@ -390,28 +397,32 @@ type Profile struct {
 
 // Tool is the JSON form of an event.Tool.
 type Tool struct {
-	ID           string          `json:"id,omitempty"`
-	Name         string          `json:"name"`
-	Args         string          `json:"args,omitempty" externalizable:"true"`
-	ResolvedName string          `json:"resolvedName,omitempty"`
-	CapabilityID string          `json:"capabilityId,omitempty"`
-	Output       string          `json:"output,omitempty" externalizable:"true"`
-	Err          string          `json:"err,omitempty" externalizable:"true"`
-	ReadOnly     bool            `json:"readOnly"`
-	Truncated    bool            `json:"truncated,omitempty"`
-	DurationMs   int64           `json:"durationMs,omitempty"`
-	StartedAt    int64           `json:"startedAt,omitempty"` // unix ms; zero when the call never ran
-	EndedAt      int64           `json:"endedAt,omitempty"`
-	Partial      bool            `json:"partial,omitempty"`
-	ArgChars     int             `json:"argChars,omitempty"`
-	Refreshed    bool            `json:"refreshed,omitempty"`
-	ParentID     string          `json:"parentId,omitempty"`
-	AttemptID    string          `json:"attemptId,omitempty"` // host-local stream_attempt id for speculative partials
-	Diff         string          `json:"diff,omitempty" externalizable:"true"`
-	Added        int             `json:"added,omitempty"`
-	Removed      int             `json:"removed,omitempty"`
-	Profile      *Profile        `json:"profile,omitempty"`
-	Execution    *ShellExecution `json:"execution,omitempty"`
+	ID                string          `json:"id,omitempty"`
+	Name              string          `json:"name"`
+	Args              string          `json:"args,omitempty" externalizable:"true"`
+	ResolvedName      string          `json:"resolvedName,omitempty"`
+	CapabilityID      string          `json:"capabilityId,omitempty"`
+	Output            string          `json:"output,omitempty" externalizable:"true"`
+	Err               string          `json:"err,omitempty" externalizable:"true"`
+	ReadOnly          bool            `json:"readOnly"`
+	Truncated         bool            `json:"truncated,omitempty"`
+	DurationMs        int64           `json:"durationMs,omitempty"`
+	StartedAt         int64           `json:"startedAt,omitempty"` // unix ms; zero when the call never ran
+	EndedAt           int64           `json:"endedAt,omitempty"`
+	Partial           bool            `json:"partial,omitempty"`
+	ArgChars          int             `json:"argChars,omitempty"`
+	Refreshed         bool            `json:"refreshed,omitempty"`
+	ParentID          string          `json:"parentId,omitempty"`
+	AttemptID         string          `json:"attemptId,omitempty"` // host-local stream_attempt id for speculative partials
+	SubagentRef       string          `json:"subagentRef,omitempty"`
+	SubagentStatus    string          `json:"subagentStatus,omitempty"`
+	SubagentErrorCode string          `json:"subagentErrorCode,omitempty"`
+	SubagentRetryable bool            `json:"subagentRetryable,omitempty"`
+	Diff              string          `json:"diff,omitempty" externalizable:"true"`
+	Added             int             `json:"added,omitempty"`
+	Removed           int             `json:"removed,omitempty"`
+	Profile           *Profile        `json:"profile,omitempty"`
+	Execution         *ShellExecution `json:"execution,omitempty"`
 }
 
 // ShellExecution is the JSON form of event.ShellExecution (local UI metadata).
@@ -488,15 +499,16 @@ type Usage struct {
 
 // CacheDiagnostics is the JSON form of cache prefix diagnostics.
 type CacheDiagnostics struct {
-	PrefixHash          string   `json:"prefixHash"`
-	PrefixChanged       bool     `json:"prefixChanged"`
-	PrefixChangeReasons []string `json:"prefixChangeReasons,omitempty"`
-	SystemHash          string   `json:"systemHash"`
-	ToolsHash           string   `json:"toolsHash"`
-	LogRewriteVersion   int      `json:"logRewriteVersion"`
-	ToolSchemaTokens    int      `json:"toolSchemaTokens"`
-	CacheMissTokens     int      `json:"cacheMissTokens"`
-	CacheHitTokens      int      `json:"cacheHitTokens"`
+	PrefixHash          string                     `json:"prefixHash"`
+	PrefixChanged       bool                       `json:"prefixChanged"`
+	PrefixChangeReasons []string                   `json:"prefixChangeReasons,omitempty"`
+	SystemHash          string                     `json:"systemHash"`
+	ToolsHash           string                     `json:"toolsHash"`
+	LogRewriteVersion   int                        `json:"logRewriteVersion"`
+	ToolSchemaTokens    int                        `json:"toolSchemaTokens"`
+	CacheMissTokens     int                        `json:"cacheMissTokens"`
+	CacheHitTokens      int                        `json:"cacheHitTokens"`
+	SessionContext      *SessionContextDiagnostics `json:"sessionContext,omitempty"`
 }
 
 // Guardian is the JSON form of an event.GuardianResult.
@@ -560,7 +572,7 @@ func ToWireAsk(a event.Ask) *Ask {
 
 // ToWireCacheDiagnostics converts cache diagnostics into their JSON wire form.
 func ToWireCacheDiagnostics(d *event.CacheDiagnostics) *CacheDiagnostics {
-	return &CacheDiagnostics{
+	out := &CacheDiagnostics{
 		PrefixHash:          d.PrefixHash,
 		PrefixChanged:       d.PrefixChanged,
 		PrefixChangeReasons: append([]string(nil), d.PrefixChangeReasons...),
@@ -571,6 +583,18 @@ func ToWireCacheDiagnostics(d *event.CacheDiagnostics) *CacheDiagnostics {
 		CacheMissTokens:     d.CacheMissTokens,
 		CacheHitTokens:      d.CacheHitTokens,
 	}
+	if sc := d.SessionContext; sc != nil {
+		section := func(in event.SessionContextSectionDiagnostics) SessionContextSectionDiagnostics {
+			return SessionContextSectionDiagnostics{Digest: in.Digest, Chars: in.Chars}
+		}
+		out.SessionContext = &SessionContextDiagnostics{
+			Version: sc.Version, Digest: sc.Digest, TargetRole: sc.TargetRole,
+			Reasons:     append([]string(nil), sc.Reasons...),
+			Environment: section(sc.Environment), Workspace: section(sc.Workspace),
+			BackgroundMemory: section(sc.BackgroundMemory), SkillsCatalog: section(sc.SkillsCatalog),
+		}
+	}
+	return out
 }
 
 // KindNames returns every stable frontend event kind in event.Kind order. It is

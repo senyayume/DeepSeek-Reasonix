@@ -43,6 +43,9 @@ const (
 // Message is a single conversation message.
 type Message struct {
 	Role Role `json:"role"`
+	// Origin distinguishes real user input from host-generated user-role protocol
+	// messages. omitempty keeps legacy sessions readable by previous releases.
+	Origin MessageOrigin `json:"origin,omitempty"`
 	// Content is the provider-visible conversation content.
 	// Keepingthislegacyfieldprovider-visiblepreservesreplay for older CLI/Desktop releases.
 	Content string `json:"content,omitempty"`
@@ -1035,6 +1038,9 @@ type Config struct {
 	Model   string         // model id
 	APIKey  string         // resolved from api_key_env
 	Extra   map[string]any // kind-specific options
+	// ModelInfo is adapter-owned metadata for the exact model instance. It is
+	// optional so existing third-party factories remain source-compatible.
+	ModelInfo *ModelInfo
 }
 
 // AuthError reports that a provider rejected the API key (HTTP 401/403).

@@ -163,11 +163,41 @@ console.log("\nbundle budgets");
 // The generation-bound history-prepend lease adds stable-key reader anchoring,
 // full mounted coverage, and one final arbiter-owned correction. The measured
 // path is 457.406 KiB after extracting the lease owner to satisfy repolint.
-// Latest-base transcript settle ownership measures 457.518 KiB with this UX;
-// isolated conversation forks and their extracted browser mock adapter bring
-// the combined tree to 458.158 KiB. Retain 0.042 KiB with the smallest
-// one-decimal ratchet.
-const initialJSBudgetKiB = process.env.REASONIX_CHANNEL === "test" ? 458.2 : 458.2;
+// Latest-base transcript settle ownership measures 457.523 KiB with this UX.
+// Isolated conversation forks and their extracted browser mock adapter bring
+// the combined tree to 458.158 KiB; completion uncertainty adds a terminal
+// outcome and notice without exposing evaluator audits to the frontend,
+// measuring 458.287 KiB gzip.
+// Transactional Ask resolution and authoritative rejected-submit recovery add
+// 0.3 KiB gzip to the initial controller path. Retain the exact turn fence,
+// bounded ListTabs retry, and stale-prompt guard.
+// Session-catalog repair presentation stays in the lazy project-tree chunk;
+// compact shared helpers keep the combined initial path within the same gate.
+// Merge-Back adds identity-bound inspection, navigation, and retained-recovery
+// orchestration on top. The merged stable build measures 461.338 KiB and the
+// test channel measures 461.323 KiB. Deferring selection ownership until a
+// real range exists (#9703/#9711) and adding the session takeover banners
+// move the combined path to 462.2 KiB. Local spectator reclaim adds the
+// desktop-vs-remote command branch. Sticky Context's session-scoped file chips
+// bring the merged stable path to 462.587 KiB. Windows' embedded build metadata
+// lands just above the rounded 462.6 KiB boundary; retain one cross-platform
+// decimal step without widening any chunk or raw gate.
+// Reading the applied item-list transform (instead of the remembered offset)
+// keeps the reader/anchor visual guards from compounding under reduced-motion
+// WebView2; the merged path measures 462.827 KiB. Retain one decimal step.
+// Generation-bound native-thumb transactions and the rebased custom-scrollbar
+// drag add 0.3 KiB gzip; the merged path measures 463.102 KiB.
+// Absorbing content-preserving block-window prepends into the active reader
+// transaction adds 0.2 KiB gzip on top; the merged path measures 463.292 KiB,
+// 8 bytes under the next decimal. Retain one cross-platform decimal step.
+// The subagent outcome envelope, partial-state card, and history hydration add
+// 0.5 KiB gzip on the initial path. The model-capability resolver and its
+// read-only provider badges add a measured 0.2 KiB including gzip/toolchain
+// rounding. Direct topic-bar actions replace the overflow trigger; together
+// with per-model image guidance, shared model matching, and Automation's page
+// projection, the merged path measures 464.590 KiB. Export formats and the
+// provider editor remain lazy; retain only the next one-decimal ceiling.
+const initialJSBudgetKiB = 464.7;
 assertBudget("initial JavaScript gzip", initialJSGzip, initialJSBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk gzip", largestInitialJS, 280 * 1024);
 // Render-blocking CSS is intentionally absent: styles.css loads deferred via
@@ -186,7 +216,10 @@ if (initialCSS.length > 0) {
 // the retained-transcript navigation allowance; keep the ratchet explicit.
 // The navigation mask's stable composer footprint and remote tab/surface
 // states bring the merged shell to roughly 115.7 KiB gzip.
-assertBudget("deferred app-shell CSS gzip", appShellCSSGzip, 116.0 * 1024);
+// The one-row model configuration list, responsive stacking, and Automation's
+// shared title-safe shell measure 116.423 KiB gzip while reusing existing
+// layout primitives. Retain only the next one-decimal ceiling.
+assertBudget("deferred app-shell CSS gzip", appShellCSSGzip, 116.5 * 1024);
 if (localeChunks.length !== 2) {
   throw new Error(`expected 2 on-demand Chinese locale chunks, found ${localeChunks.length}`);
 }
@@ -222,7 +255,22 @@ for (const path of localeChunks) {
   // reachable-tail recovery copy, the merged chunks measure 58.923 KiB zh and
   // 59.710 KiB zh-TW. The isolated-fork guidance brings the measured chunks
   // to 59.1 KiB zh and 59.9 KiB zh-TW; retain a narrow one-decimal ratchet.
-  const budget = name.startsWith("zh-TW-") ? 60.0 * 1024 : 59.2 * 1024;
+  // Merge-Back lifecycle and recovery guidance measure 59.819 KiB zh and
+  // 60.612 KiB zh-TW; retain only the next one-decimal ceiling for each.
+  // The retained-recovery receipt and copy action move zh to 59.911 KiB;
+  // session-catalog recovery guidance on the merged base moves zh-TW to
+  // 60.757 KiB; retain only its exact one-decimal ceiling.
+  // Session takeover adds ~20 locale keys per dialect (banners, dialog,
+  // reclaim), while Sticky Context adds file-state and limit diagnostics. The
+  // merged stable chunks measure 60.395 KiB zh and 61.232 KiB zh-TW; retain
+  // only the next one-decimal ceiling for each dialect.
+  // The outcome card adds one short localized status label per dialect. CI's
+  // Windows zlib measured zh at 60.4 KiB exactly; capability-status copy adds
+  // a small 0.1 KiB ratchet, so retain the next decimal ceiling rather than
+  // dropping the unknown-state explanation.
+  // Image input mode, provenance and unknown-state guidance measure 60.724 KiB
+  // zh and 61.570 KiB zh-TW. Keep the next decimal ceiling per locale.
+  const budget = name.startsWith("zh-TW-") ? 61.6 * 1024 : 60.8 * 1024;
   assertBudget(`${name} gzip`, gzipBytes(path), budget);
 }
 
@@ -286,12 +334,42 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // The stranded-tail recovery transition plus the WebView2 reachable-tail clamp
 // bring the measured initial payload to 2447.953 KiB. Retain 0.047 KiB with
 // the smallest one-decimal ratchet.
-// The extracted history-prepend owner and compact session-version host measure
-// 2452.7 KiB together; the recovery coordinator and dialog remain lazy. Retain
-// the smallest one-decimal headroom without widening unrelated chunk ceilings.
-// Latest-base transcript settle ownership brings the measured path to
-// 2452.773 KiB; isolated conversation forks bring the combined tree to
-// 2454.679 KiB. Retain 0.021 KiB with the smallest one-decimal ratchet.
-const rawInitialBudgetKiB = process.env.REASONIX_CHANNEL === "test" ? 2_454.7 : 2_454.7;
+// The extracted history-prepend owner adds 3.953 KiB of bounded transaction
+// state and stable-key coverage checks. Together with the compact
+// session-version host, they measure 2452.7 KiB; the recovery coordinator and
+// dialog remain lazy. Completion uncertainty adds a distinct terminal notice
+// and localized startup copy without collapsing into recovery-paused UX.
+// 2454.719 KiB on the release toolchain. Completion uncertainty brings the
+// final merged payload to 2455.154 KiB.
+// Ask turn fencing, rejection reconciliation, and the localized submit-failure
+// notice measure 2456.044 KiB raw; retain 0.056 KiB of one-decimal headroom.
+// Merge-Back's startup ownership and failure-atomic navigation fence add the
+// remaining bounded payload. The retained recovery receipt makes the stable
+// path 2465.105 KiB raw; the merged test channel measures 2464.979 KiB.
+// Session takeover banners and #9703/#9711's provisional-selection handoff
+// combine with Sticky Context's pinned-file state at 2469.125 KiB raw on the
+// merged stable path. Retain only the next one-decimal ceiling.
+// The passive reader-anchor lease for delayed WebView2 range commits measures
+// 2469.347 KiB raw (+0.222 KiB, +0.009%). Retain only the next one-decimal
+// ceiling; gzip and largest-chunk budgets remain unchanged.
+// Reading the applied item-list transform for the reader/anchor visual guards
+// adds 0.5 KiB raw on top; the merged path measures 2469.815 KiB.
+// The scrollbar generation fence and drag rebase add 1.1 KiB raw; the merged
+// path measures 2470.932 KiB.
+// The reader-transaction offset absorption adds 0.8 KiB raw on top; the merged
+// path measures 2471.741 KiB. Controller-owned management dispositions and
+// optimistic management settlement add 0.6 KiB raw; retain the smallest
+// one-decimal ceiling with bounded headroom.
+// The outcome card and history hydration add 2.3 KiB raw on the initial path
+// (2474.0 KiB measured in CI). Keep this narrowly attributable ratchet rather
+// than removing persisted-result visibility or changing chunk ownership.
+// On the current main-v2 base, the combined measured path is 2474.6 KiB;
+// the model-capability helper and localized status copy add 0.9 KiB; retain
+// the smallest bounded cross-platform ceiling.
+// Direct topic-bar actions, the macOS single-row dock tabs, responsive model
+// configuration, and Automation's shell projection measure 2481.132 KiB raw
+// together. Retain only the next decimal ceiling without relaxing independent
+// chunk gates.
+const rawInitialBudgetKiB = 2_481.2;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);

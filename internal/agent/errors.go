@@ -50,7 +50,39 @@ func PauseClass(err error) string {
 	if errors.As(err, &recovery) {
 		return "recovery_paused"
 	}
+	var completion *CompletionUncertainError
+	if errors.As(err, &completion) {
+		return "completion_uncertain"
+	}
+	var incompleteRead *IncompleteReadError
+	if errors.As(err, &incompleteRead) {
+		return "incomplete_read"
+	}
 	return ""
+}
+
+// IncompleteReadError is a recoverable run boundary: a read_file result was
+// only partially visible and the host refused to let the model silently treat
+// it as complete. It carries only routing/size metadata, never file contents.
+type IncompleteReadError struct {
+	Reason        string
+	Path          string
+	ToolCallID    string
+	ResultRef     string
+	NextOffset    int
+	ConsumedBytes int
+	TotalBytes    int
+}
+
+func (e *IncompleteReadError) Error() string {
+	if e == nil {
+		return "read_file did not complete"
+	}
+	detail := strings.TrimSpace(e.Reason)
+	if detail == "" {
+		detail = "the retained result still has unread content"
+	}
+	return "read_file did not complete safely: " + detail
 }
 
 // RunPauseInfo is the stable host-facing description of a deliberate Run
@@ -73,6 +105,10 @@ func InspectRunPause(err error) (RunPauseInfo, bool) {
 	var budget *taskBudgetPause
 	if errors.As(err, &budget) {
 		return RunPauseInfo{Kind: "task_budget", Key: budget.axis, HostOwned: true, Reason: budget.detail}, true
+	}
+	var incompleteRead *IncompleteReadError
+	if errors.As(err, &incompleteRead) {
+		return RunPauseInfo{Kind: "incomplete_read", HostOwned: true, Reason: incompleteRead.Reason}, true
 	}
 	return RunPauseInfo{}, false
 }
@@ -133,4 +169,31 @@ func (e *RecoveryPauseError) Error() string {
 		return e.Message
 	}
 	return "Automatic retries paused. Reasonix stopped repeated attempts and kept completed work. Send \"continue\" to start a fresh attempt, or add instructions to change direction."
+}
+
+// CompletionUncertainContextTool is the retained host-safety cause for a
+// context-unavailable tool being called again after the repair instruction.
+const CompletionUncertainContextTool = "context_tool_repeat"
+
+// CompletionUncertainError reports that a host safety condition paused the
+// current turn after completed work was retained. It is a control-flow signal,
+// not a provider failure: the candidate answer, tool results, and completed
+// work stay in the session, and the user can continue in the next message.
+type CompletionUncertainError struct {
+	// Cause is the stable classifier naming why completion stayed unconfirmed.
+	Cause string
+	// Message is the user-facing English product copy for wire/CLI clients.
+	Message string
+	// Detail is optional expandable diagnostic text; never product copy.
+	Detail string
+}
+
+func (e *CompletionUncertainError) Error() string {
+	if e == nil {
+		return "completion could not be confirmed"
+	}
+	if strings.TrimSpace(e.Message) != "" {
+		return e.Message
+	}
+	return "Completion could not be confirmed. Reasonix kept the current result and all completed work. Send \"continue\" to resume, or restate what should change."
 }

@@ -10,7 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/syntax"
 
@@ -21,6 +20,7 @@ import (
 	"reasonix/internal/event"
 	"reasonix/internal/evidence"
 	"reasonix/internal/extension/dispatch"
+	"reasonix/internal/i18n"
 	"reasonix/internal/instruction"
 	"reasonix/internal/jobs"
 	"reasonix/internal/mcpinteraction"
@@ -293,6 +293,7 @@ type Agent struct {
 	reasoningLanguage    atomic.Value // string: auto|zh|en
 
 	requireVisibleFinal bool // internal callers require final Content
+	continuationPolicy  ContinuationPolicy
 
 	// unwrittenResolve is the resolve watermark a failed state write still owes.
 	// It outlives the conversation, which is why it is not in sessionRuntime.
@@ -397,6 +398,8 @@ type Agent struct {
 	// tool loop is active, but it must keep this message and everything after it
 	// verbatim so cancellation/crash recovery can retain completed tool pairs.
 	activeTurnCreatedAt atomic.Int64
+	// Pinned revisions are staged after admission and appended with the user turn.
+	pinned pinnedContextRuntime
 }
 
 type repeatFailureRecord struct {
@@ -577,35 +580,6 @@ func (a *Agent) MutationObserver() *checkpoint.MutationObserver {
 		return nil
 	}
 	return a.svc.mutationObserver
-}
-
-// Session returns the agent's current conversation, useful for persistence
-// hooks that need to read the message log between turns. sessMu serialises this
-// pointer read against SetSession, so a frontend (serve's concurrent /history and
-// /new handlers) can't race the swap. The run loop touches a.session directly and
-// only swaps it via SetSession while idle, so its reads need no lock.
-func (a *Agent) Session() *Session {
-	a.sess.mu.Lock()
-	defer a.sess.mu.Unlock()
-	return a.sess.conversation
-}
-
-// SetSession replaces the agent's conversation wholesale. Used by
-// `reasonix --resume` to load a saved JSONL transcript before the first turn,
-// so the model picks up exactly where it left off. Callers serialise it against a
-// running turn (it only fires while idle); sessMu guards the pointer swap itself.
-func (a *Agent) SetSession(s *Session) {
-	a.sess.reset(s)
-	// The replaced conversation's task is over, but the ledger and the bill
-	// answer to beginRunTurn's scope check rather than to this seam.
-	a.task.repeatFailures = nil
-	a.task.repeatScope = ""
-	a.pending.preserveEvidence = false
-	a.pending.finalReadinessRecovery = false
-	a.pending.finalReadinessRecoveryPrepared = false
-	if s != nil {
-		a.rebuildTodoState(s.Snapshot())
-	}
 }
 
 // LastUsage returns the most recent per-turn token telemetry the provider
@@ -818,8 +792,10 @@ func (a *Agent) flushSteerQueue() {
 
 // UnappliedSteerNotice returns the durable warning shown for guidance that was
 // accepted during an abnormal turn exit but never reached a provider request.
+// The user's guidance rides the format's trailing %s so fronts can split it
+// back out at the first newline.
 func UnappliedSteerNotice(text string) string {
-	return "Guidance was not applied because the turn ended before it could be processed. Send it again if it is still needed:\n" + text
+	return fmt.Sprintf(i18n.M.UnappliedSteerFmt, text)
 }
 
 // RecordUnappliedSteer stores guidance that could not affect its intended
@@ -863,7 +839,12 @@ func (a *Agent) CompactRatio() float64 { return a.compactRatio }
 
 // CompactNow forces one projection compaction (canonical transcript untouched).
 func (a *Agent) CompactNow(ctx context.Context, instructions string) error {
-	_, err := a.contextManager().Prepare(ctx, ContextPreparePolicy{Trigger: CompactionTriggerManual, Instructions: instructions, Force: true})
+	_, err := a.contextManager().Prepare(ctx, ContextPreparePolicy{
+		Trigger:              CompactionTriggerManual,
+		Instructions:         instructions,
+		Force:                true,
+		AllowChunkedFallback: true,
+	})
 	return err
 }
 
@@ -895,6 +876,9 @@ type Options struct {
 	ModelRef string
 	// RequireVisibleFinal makes internal callers reject reasoning-only responses.
 	RequireVisibleFinal bool
+	// ContinuationPolicy is the internal host policy for synthetic same-Run
+	// continuation. The zero value (ContinuationDisabled) is the product default.
+	ContinuationPolicy ContinuationPolicy
 	// Gate is the per-call permission gate. nil disables gating.
 	Gate Gate
 	// ReadOnlyExecution enables a permanent host-side read-only boundary for
@@ -1131,6 +1115,7 @@ func New(prov provider.Provider, tools *tool.Registry, session *Session, opts Op
 			budget: runBudget{limit: normalizeTaskBudget(opts.TaskBudget)},
 		},
 		requireVisibleFinal: opts.RequireVisibleFinal,
+		continuationPolicy:  opts.ContinuationPolicy,
 		recovery: recoveryIdentity{
 			agentID: strings.TrimSpace(opts.RecoveryAgentID),
 			taskID:  strings.TrimSpace(opts.RecoveryTaskID),
@@ -1157,7 +1142,7 @@ func New(prov provider.Provider, tools *tool.Registry, session *Session, opts Op
 	if warnDeprecatedRetention {
 		deprecatedContextRetentionWarning.Do(func() {
 			a.svc.sink.Emit(event.Event{Kind: event.Notice, Level: event.LevelWarn,
-				Text:   "agent.keep and agent.recent_keep are deprecated.",
+				Text:   i18n.M.DeprecatedContextRetention,
 				Detail: "Harness-style compaction now retains only the newest 16% of the context window; legacy retention fields are preserved in configuration but ignored at runtime."})
 		})
 	}
@@ -1291,10 +1276,15 @@ func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 		// If an extension blocks earlier, release the in-memory reservation so
 		// the still-pending durable marker can authorize a later retry.
 		a.RestoreFinalReadinessRecoveryPreparation()
+		a.discardStagedPinnedContext()
 		return err
 	}
 
-	_, state := a.beginRunTurn(ctx, input)
+	pinned, err := a.preparePinnedRevision()
+	if err != nil {
+		return err
+	}
+	_, state := a.beginRunTurn(ctx, input, pinned)
 	if a.pending.forkRestore != nil {
 		a.pending.forkRestore(state)
 	}
@@ -1702,34 +1692,12 @@ func hasVisibleFinalAnswer(text string) bool {
 	return strings.TrimSpace(text) != ""
 }
 
-// reasoningOnlyFinishHonoured reports whether the model finished with a stop
-// signal but placed its answer in the reasoning stream rather than the content
-// block. DeepSeek thinking mode does this occasionally: it streams a long
-// reasoning_content, then returns finish_reason="stop" with an empty content.
-// The model has signalled completion, so the host accepts the turn instead of
-// retrying and forcing another expensive thinking round.
-//
-// The accept is scoped to DeepSeek thinking mode (ToolCallReasoningPolicy):
-// for other providers a reasoning-only turn keeps the empty-final retry
-// safety net — local <think>-tag models often recover a visible answer on
-// the second attempt, and a gateway that mislabels truncation as "stop"
-// must not have a degenerate turn committed as the final answer.
-func reasoningOnlyFinishHonoured(p provider.Provider, u *provider.Usage, reasoning string) bool {
-	if !provider.RequiresToolCallReasoning(p) {
-		return false
-	}
-	if u == nil || u.FinishReason != "stop" {
-		return false
-	}
-	return strings.TrimSpace(reasoning) != ""
-}
-
 func emptyFinalRetryMessage() string {
 	return "The previous assistant response finished without any visible answer text. Continue the same task now and provide a concise visible answer to the user. Do not send reasoning only."
 }
 
 func emptyFinalNotice() string {
-	return "No visible answer was produced; asking the assistant to respond again."
+	return i18n.M.EmptyFinal
 }
 
 func emptyFinalNoticeDetail(prov string, u *provider.Usage, reasoningLen int) string {
@@ -1741,11 +1709,11 @@ func emptyFinalNoticeDetail(prov string, u *provider.Usage, reasoningLen int) st
 }
 
 func executorHandoffNoticeText() string {
-	return "The assistant answered before taking action; asking it to use the required tools."
+	return i18n.M.ExecutorHandoff
 }
 
 func toolBudgetNoticeText() string {
-	return "Tool round limit reached; asking the assistant to summarize progress."
+	return i18n.M.ToolBudget
 }
 
 // stream runs one completion, emitting reasoning and text deltas as typed
@@ -1767,7 +1735,6 @@ func (a *Agent) streamWithFrozen(ctx context.Context, turn int, sink event.Sink,
 	// Reuse a parent attempt counter when present so stream retries accumulate
 	// into one RequestCount; otherwise install a fresh counter for this call.
 	ctx = provider.WithRequestAttemptCounter(ctx)
-	ctx = a.withMissingReasoningFallback(ctx)
 	// A stream can terminate locally before the provider channel closes (for
 	// example when the client-side reasoning guard fires). Own a child context
 	// here so every return path aborts the HTTP request and releases the provider
@@ -1832,7 +1799,7 @@ func (a *Agent) streamWithFrozen(ctx context.Context, turn int, sink event.Sink,
 			}
 		}
 		stored = display
-		if a.preserveRawReasoning(signature, reasoningID, reasoningStatus, calls, search.calls) {
+		if a.preserveRawReasoning(original, signature, reasoningID, reasoningStatus, calls, search.calls) {
 			stored = original
 		}
 		return stored, display
@@ -2083,7 +2050,7 @@ func (a *Agent) recordInterruptedDisplay(text, reasoning string, calls []provide
 }
 
 func (a *Agent) capturePrefixShape(schemas []provider.ToolSchema) PrefixShape {
-	return CaptureShape(a.systemPrompt(), schemas, a.sess.conversation.RewriteVersion())
+	return captureTurnContextShape(a.systemPrompt(), schemas, a.sess.conversation.RewriteVersion(), a.modelVisibleMessages())
 }
 
 func (a *Agent) systemPrompt() string {
@@ -2753,7 +2720,9 @@ func firstLine(s string) string {
 
 // truncateToolOutput builds the stable provider-visible Content form for a tool
 // result. Under-cap bodies are byte-identical; over-cap bodies keep a tool-aware
-// head and tail while RawContent stores the full local original.
+// preview while RawContent stores the full local original. read_file is special:
+// its preview is a contiguous prefix so an exact recovery cursor can never skip
+// source text that the model did not actually see.
 func truncateToolOutput(s string) (string, string) {
 	return truncateToolOutputFor(s, "", "")
 }
@@ -2763,6 +2732,9 @@ func truncateToolOutput(s string) (string, string) {
 func truncateToolOutputFor(s, toolName, toolCallID string) (string, string) {
 	if len(s) <= maxToolOutputBytes {
 		return s, ""
+	}
+	if toolName == "read_file" {
+		return truncateReadFileOutput(s, toolName, toolCallID)
 	}
 	strategy := snipStrategy{head: 40, tail: 40, headChars: 8000, tailChars: 8000}
 	switch {
@@ -2811,20 +2783,8 @@ func truncateToolOutputFor(s, toolName, toolCallID string) (string, string) {
 		}
 		marker = toolOutputRecoveryMarker(toolName, toolCallID, resultRef, len(s), len(head)+len(tail))
 	}
-	notice := fmt.Sprintf("tool output truncated: %d of %d bytes elided", len(s)-len(head)-len(tail), len(s))
+	notice := fmt.Sprintf(i18n.M.ToolOutputTruncatedFmt, len(s)-len(head)-len(tail), len(s))
 	return head + marker + tail, notice
-}
-
-// snapToRuneBoundary returns s[lo:hi] with the bounds nudged outward until
-// both land on rune-start positions.
-func snapToRuneBoundary(s string, lo, hi int) string {
-	for lo > 0 && !utf8.RuneStart(s[lo]) {
-		lo--
-	}
-	for hi < len(s) && !utf8.RuneStart(s[hi]) {
-		hi++
-	}
-	return s[lo:hi]
 }
 
 // finishReasonMessage maps an abnormal finish_reason to a one-line warning,
@@ -2836,11 +2796,11 @@ func finishReasonMessage(u *provider.Usage) (string, bool) {
 	}
 	switch u.FinishReason {
 	case "length":
-		return "response truncated: hit max output tokens", true
+		return i18n.M.FinishReasonLength, true
 	case "content_filter":
-		return "response blocked by content filter", true
+		return i18n.M.FinishReasonContentFilter, true
 	case "repetition_truncation":
-		return "response truncated: model repetition detected", true
+		return i18n.M.FinishReasonRepetition, true
 	default:
 		return "", false
 	}
@@ -2853,11 +2813,11 @@ func finishReasonMessage(u *provider.Usage) (string, bool) {
 func streamInterruptNotice(err error) (code, text string) {
 	switch provider.StreamInterruptReason(err) {
 	case provider.StreamInterruptIdleTimeout:
-		return event.NoticeCodeStreamInterruptedIdleTimeout, "model stream stalled: no data arrived before the idle timeout; check the provider gateway or network proxy"
+		return event.NoticeCodeStreamInterruptedIdleTimeout, i18n.M.StreamInterruptedIdleTimeout
 	case provider.StreamInterruptPrematureEOF:
-		return event.NoticeCodeStreamInterruptedPrematureEOF, "model stream ended before completion; the provider gateway or network proxy dropped the connection"
+		return event.NoticeCodeStreamInterruptedPrematureEOF, i18n.M.StreamInterruptedPrematureEOF
 	case provider.StreamInterruptConnectionReset:
-		return event.NoticeCodeStreamInterruptedConnectionReset, "model connection was reset; check the provider gateway or network proxy"
+		return event.NoticeCodeStreamInterruptedConnectionReset, i18n.M.StreamInterruptedConnectionReset
 	default:
 		return "", ""
 	}

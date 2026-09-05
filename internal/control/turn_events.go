@@ -270,6 +270,9 @@ func (s *turnEventDurableSink) RecordWorkspaceMutation(a event.WorkspaceMutation
 func (s *turnEventDurableSink) RecordRunBudget(a event.RunBudgetSample) {
 	event.RecordRunBudget(s.inner(), a)
 }
+func (s *turnEventDurableSink) RecordSubagentLifecycle(a event.SubagentLifecycleInfo) {
+	event.RecordSubagentLifecycle(s.inner(), a)
+}
 
 func terminalTurnStatus(e event.Event) event.TurnStatus {
 	if e.Cancelled || errors.Is(e.Err, context.Canceled) {

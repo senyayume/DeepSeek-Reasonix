@@ -54,6 +54,7 @@ import (
 	"reasonix/internal/provider"
 	"reasonix/internal/recovery"
 	"reasonix/internal/sandbox"
+	"reasonix/internal/sessioncontext"
 	"reasonix/internal/sessioninbox"
 	"reasonix/internal/sessiontemp"
 	"reasonix/internal/shellrun"
@@ -120,14 +121,19 @@ type Controller struct {
 	// one — sub-agents then keep whatever gate they were constructed with.
 	subagentGate *SharedHeadlessGate
 
-	label                  string
-	modelRef               string
-	visionModel            string
-	visionProviderResolver func(string) (provider.Provider, error)
-	visionModelSelector    func(string, string) (string, bool)
-	systemPrompt           string
-	sessionDir             string
-	commands               atomic.Pointer[[]command.Command]
+	label                   string
+	modelRef                string
+	visionModel             string
+	visionProviderResolver  func(string) (provider.Provider, error)
+	visionModelSelector     func(string, string) (string, bool)
+	modelCapabilityResolver func(*config.ProviderEntry) config.ResolvedModelCapability
+	frozenImageInput        *bool
+	imageCapabilityChanged  func() bool
+	prompt                  controllerPromptState
+	pinnedContextLoader     PinnedContextLoader
+	sessionContextStatic    sessioncontext.Sections
+	sessionDir              string
+	commands                atomic.Pointer[[]command.Command]
 	// skills owns the session's discovered skills (enabled subset, full set, and
 	// the reloadable stores) — the skills slice of the Capabilities concern. See
 	// skill.go.
@@ -480,10 +486,19 @@ type Options struct {
 	VisionModel            string
 	VisionProviderResolver func(string) (provider.Provider, error)
 	VisionModelSelector    func(string, string) (string, bool)
+	// ModelCapabilityResolver returns the adapter/config-resolved metadata for
+	// the exact active model. Nil keeps the legacy config-only behavior.
+	ModelCapabilityResolver func(*config.ProviderEntry) config.ResolvedModelCapability
+	// FrozenImageInput belongs to the provider instance built for this runtime.
+	FrozenImageInput       *bool
+	ImageCapabilityChanged func() bool
 	SystemPrompt           string
-	SessionDir             string
-	SessionPath            string
-	Host                   *plugin.Host
+	// PinnedContextLoader snapshots the current session sidecar at turn
+	// admission. The Agent persists changes as append-only user-role revisions.
+	PinnedContextLoader PinnedContextLoader
+	SessionDir          string
+	SessionPath         string
+	Host                *plugin.Host
 	// MCPHostProfile is the surface lazily created hosts declare; injected
 	// hosts keep their own profile.
 	MCPHostProfile plugin.HostProfile
@@ -549,6 +564,10 @@ type Options struct {
 	// means no transient injection because the stable language policy already
 	// follows the conversation language.
 	ReasoningLanguage string
+	// SessionContextStatic carries boot-observed runtime facts that belong in a
+	// host user-turn snapshot rather than the cache-stable system prompt. Only
+	// Environment and Workspace are consumed; memory and skills stay live.
+	SessionContextStatic sessioncontext.Sections
 	// DisableColdResumePrune suppresses the cold-resume cache-state notice.
 	// Resume never rewrites history regardless of this flag.
 	DisableColdResumePrune bool
@@ -656,7 +675,12 @@ func New(opts Options) *Controller {
 		visionModel:                       strings.TrimSpace(opts.VisionModel),
 		visionProviderResolver:            opts.VisionProviderResolver,
 		visionModelSelector:               opts.VisionModelSelector,
-		systemPrompt:                      opts.SystemPrompt,
+		modelCapabilityResolver:           opts.ModelCapabilityResolver,
+		frozenImageInput:                  opts.FrozenImageInput,
+		imageCapabilityChanged:            opts.ImageCapabilityChanged,
+		prompt:                            newControllerPromptState(opts.SystemPrompt, opts.Executor),
+		pinnedContextLoader:               opts.PinnedContextLoader,
+		sessionContextStatic:              opts.SessionContextStatic,
 		sessionDir:                        opts.SessionDir,
 		sessionPath:                       opts.SessionPath,
 		commands:                          atomic.Pointer[[]command.Command]{},
@@ -730,7 +754,6 @@ func New(opts Options) *Controller {
 	// Auto Guard is built into Auto. Ask and YOLO bypass it through the mode
 	// provider, so no separate enablement state is needed.
 	c.initRecoveryGate(opts.RecoveryReviewer, opts.RecoveryHeadless)
-
 	// Task monitoring: record background-job lifecycle into the project-local
 	// task store so CLI, Desktop, scripts, and future clients observe the same
 	// state/event evidence. The recorder swallows its own failures — monitoring
@@ -829,23 +852,6 @@ func (c *Controller) SetProviderResolver(r provider.Resolver) {
 	c.mu.Unlock()
 }
 
-// ApplyExtensionSystemPrompt swaps the executor to a fresh session carrying
-// the extension strategy's final system prompt and makes it the controller's
-// rotation prompt, so /new and /clear keep the strategy-composed prompt too.
-// Boot calls it when a system_prompt.build replacement changed the prompt
-// after the controller (and its session) was built with the host-composed
-// one. It must run before any turn or history resume: the fresh session holds
-// only the system message, so a later resume cleanly layers history on top.
-func (c *Controller) ApplyExtensionSystemPrompt(prompt string) {
-	if c == nil || c.executor == nil {
-		return
-	}
-	c.mu.Lock()
-	c.systemPrompt = prompt
-	c.mu.Unlock()
-	c.executor.SetSession(agent.NewSession(prompt))
-}
-
 // SetOnSessionRecovered installs the ownership handoff invoked before the
 // controller commits to an automatically created recovery branch. Frontends
 // that acquire their session owner after controller construction (for example
@@ -931,7 +937,7 @@ func (c *Controller) recordDisplayForNewUser(startMessages int, display string) 
 		startMessages = len(msgs)
 	}
 	for _, m := range msgs[startMessages:] {
-		if m.Role == provider.RoleUser {
+		if agent.IsUserAuthoredTurnMessage(m) {
 			c.recordDisplay(m.Content, display)
 			return
 		}
@@ -948,7 +954,7 @@ func (c *Controller) markEditedForNewUser(startMessages int, original string) {
 		startMessages = len(msgs)
 	}
 	for i := startMessages; i < len(msgs); i++ {
-		if msgs[i].Role != provider.RoleUser {
+		if !agent.IsUserAuthoredTurnMessage(msgs[i]) {
 			continue
 		}
 		if agent.UserMessageText(msgs[i]) == original {
@@ -1091,18 +1097,6 @@ func (c *Controller) finishGuardedTurn(err error, completion *guardedTurnComplet
 	// steers in the completed turn. Dispatch still waits for finishing to clear.
 	c.onInboxTurnDone()
 	c.sink.Emit(done)
-}
-
-func turnOutcome(err error) string {
-	var readinessErr *agent.FinalReadinessError
-	if errors.As(err, &readinessErr) {
-		return event.TurnOutcomeFinalReadiness
-	}
-	var pauseErr *agent.RecoveryPauseError
-	if errors.As(err, &pauseErr) {
-		return event.TurnOutcomeRecoveryPaused
-	}
-	return ""
 }
 
 // Send starts a turn with an uncomposed message. The controller applies
@@ -2039,7 +2033,7 @@ func (c *Controller) runReady(ctx context.Context, input string) (err error) {
 	startMessages := c.messageCount()
 	var marker agent.InFlightTurnMeta
 	defer func() { c.finishInFlightTurn(startMessages, marker) }()
-	c.beginCheckpoint(ctx, input)
+	c.beginCheckpoint(ctx, rawInput)
 	if c.guardianSess != nil {
 		c.guardianSess.ResetTurn()
 	}
@@ -2054,13 +2048,14 @@ func (c *Controller) runReady(ctx context.Context, input string) (err error) {
 		defer func() { c.hooks.StopResult(context.Background(), lastAssistantText(c.History()), turn, err) }()
 	}
 	marker = c.markInFlightTurn(startMessages, true)
+	ctx = c.withTurnContext(ctx, true)
 	ctx = c.withPlannerTurnMetadata(ctx, rawInput, false, startMessages)
 	modelInput := c.withCapabilityRoute(ctx, input, rawInput)
 	modelInput, ctx, err = c.prepareVisionTurn(ctx, modelInput, agent.SubagentImageCandidates(ctx))
 	if err != nil {
 		return err
 	}
-	err = c.runner.Run(ctx, modelInput)
+	err = c.runModelTurn(ctx, modelInput)
 	return err
 }
 
@@ -2988,8 +2983,9 @@ func (c *Controller) maybeSessionStart(ctx context.Context) {
 }
 
 // NewSession snapshots the current conversation, rotates to a fresh file, and
-// resets the executor to a clean session carrying the same system prompt. It
-// ends the old session and starts the new one for lifecycle hooks.
+// resets the executor to a clean session carrying the same base system prompt.
+// Session-owned pinned context intentionally starts empty. It ends the old
+// session and starts the new one for lifecycle hooks.
 func (c *Controller) NewSession() error {
 	if c.executor == nil {
 		return nil
@@ -3024,7 +3020,7 @@ func (c *Controller) NewSession() error {
 	if c.sessionDir != "" {
 		freshPath = agent.NewSessionPath(c.sessionDir, c.label)
 	}
-	freshSession := agent.NewSession(c.systemPrompt)
+	freshSession := agent.NewSession(c.basePrompt())
 	commitTransition, err := c.prepareSessionTransition(freshPath, "new", freshSession)
 	if err != nil {
 		return fmt.Errorf("bind new session: %w", err)
@@ -3062,7 +3058,8 @@ func (c *Controller) NewSession() error {
 }
 
 // ClearSession discards the current conversation without preserving it in
-// resume/history, then rotates to a clean session carrying the same system prompt.
+// resume/history, then rotates to a clean session carrying the same base system
+// prompt and no pinned context.
 func (c *Controller) ClearSession() error {
 	if c.executor == nil {
 		return nil
@@ -3115,7 +3112,7 @@ func (c *Controller) ClearSession() error {
 	if c.sessionDir != "" {
 		freshPath = agent.NewSessionPath(c.sessionDir, c.label)
 	}
-	freshSession := agent.NewSession(c.systemPrompt)
+	freshSession := agent.NewSession(c.basePrompt())
 	commitTransition, err := c.prepareSessionTransition(freshPath, "clear", freshSession)
 	if err != nil {
 		if destroy.Async {
@@ -4299,10 +4296,7 @@ func interruptedTurnCrossesLaterTurn(msgs []provider.Message, start int) bool {
 	}
 	turns := 0
 	for _, msg := range msgs[start:] {
-		if msg.Role != provider.RoleUser || agent.IsCompactionSummary(msg) {
-			continue
-		}
-		if _, ok := agent.SteerText(msg.Content); ok {
+		if !agent.IsUserAuthoredTurnMessage(msg) {
 			continue
 		}
 		turns++
@@ -4396,13 +4390,7 @@ func (c *Controller) stripCancelledVisibleTurnMessagesAfterWithFallbackAt(idx in
 	keptUser := false
 	userEnd := idx
 	for i, m := range msgs[idx:] {
-		if m.Role != provider.RoleUser {
-			continue
-		}
-		if IsSyntheticUserMessage(m.Content) {
-			continue
-		}
-		if _, ok := agent.SteerText(m.Content); ok {
+		if !agent.IsUserAuthoredTurnMessage(m) {
 			continue
 		}
 		m.Content = StripComposePrefixes(m.Content)
@@ -4411,7 +4399,7 @@ func (c *Controller) stripCancelledVisibleTurnMessagesAfterWithFallbackAt(idx in
 		userEnd = idx + i + 1
 		break
 	}
-	if !keptUser && fallback.Role == provider.RoleUser {
+	if !keptUser && agent.IsUserAuthoredTurnMessage(fallback) {
 		fallback.Content = StripComposePrefixes(fallback.Content)
 		if strings.TrimSpace(fallback.Content) != "" {
 			fallback.Images = append([]string(nil), fallback.Images...)
@@ -4524,18 +4512,15 @@ func (c *Controller) inFlightTurnStartedAt() time.Time {
 // sidecars without timestamps.
 func resolveInterruptedTurnStart(msgs []provider.Message, idx int, preserveUser bool, startedAt time.Time, fallback provider.Message) (int, bool) {
 	fallbackContent := ""
-	if fallback.Role == provider.RoleUser {
+	if agent.IsUserAuthoredTurnMessage(fallback) {
 		fallbackContent = StripComposePrefixes(fallback.Content)
 	}
 	matchesKind := func(m provider.Message) bool {
-		if m.Role != provider.RoleUser {
+		if m.Role != provider.RoleUser || agent.IsPinnedContextRevision(m) {
 			return false
 		}
 		if preserveUser {
-			if IsSyntheticUserMessage(m.Content) {
-				return false
-			}
-			if _, ok := agent.SteerText(m.Content); ok {
+			if !agent.IsUserAuthoredTurnMessage(m) {
 				return false
 			}
 			if fallbackContent != "" && StripComposePrefixes(m.Content) != fallbackContent {
@@ -5031,10 +5016,9 @@ func (c *Controller) SetSkillEnabled(name string, enabled bool) error {
 
 // CreateSkill writes a new skill file at the given scope and returns its
 // path. Skills()/AllSkills()/RunSkill() read the live store on demand, so the
-// new skill is usable (by name) immediately with no rebuild; the caller
-// should still rebuild the controller for the pinned Skills index and tool
-// registry to reflect it on the model's next turn, mirroring how
-// SetSkillEnabled's callers already rebuild after a config change.
+// new skill is usable (by name) immediately with no rebuild and appears in the
+// next real user turn's live session-context catalog. Rebuilds remain necessary
+// when the tool registry or enabled-skill configuration changes.
 func (c *Controller) CreateSkill(name string, scope skill.Scope, content string) (string, error) {
 	w := c.skills.writer()
 	if w == nil {
@@ -5403,6 +5387,9 @@ func (c *Controller) ModelRef() string { return c.modelRef }
 func (c *Controller) WorkspaceRoot() string { return c.workspaceRoot }
 
 func (c *Controller) imageInputEnabled() bool {
+	if c.frozenImageInput != nil {
+		return *c.frozenImageInput
+	}
 	ref := c.modelRef
 	cfg, err := config.LoadForRoot(c.workspaceRoot)
 	if err == nil && ref == "" {
@@ -5412,12 +5399,33 @@ func (c *Controller) imageInputEnabled() bool {
 		return false
 	}
 	entry, ok := cfg.ResolveModel(ref)
-	return ok && config.EffectiveVision(entry)
+	if !ok {
+		return false
+	}
+	if c.modelCapabilityResolver != nil {
+		return c.modelCapabilityResolver(entry).State == config.CapabilitySupported
+	}
+	return config.EffectiveVision(entry)
 }
 
 // ImageInputEnabled reports whether the current model accepts direct image
 // inputs, so frontends can gate image-only UX before a turn starts.
 func (c *Controller) ImageInputEnabled() bool { return c.imageInputEnabled() }
+
+// ImageInputSnapshot avoids configuration reads on the Desktop metadata path.
+// Legacy/custom controllers without a frozen boot snapshot use the existing
+// background metadata fallback instead.
+func (c *Controller) ImageInputSnapshot() (enabled, fallback, available bool) {
+	if c == nil || c.frozenImageInput == nil {
+		return false, false, false
+	}
+	return *c.frozenImageInput, c.visionModel != "", true
+}
+
+// ImageCapabilityChanged lets desktop refresh an idle runtime before admission.
+func (c *Controller) ImageCapabilityChanged() bool {
+	return c.imageCapabilityChanged != nil && c.imageCapabilityChanged()
+}
 
 // InheritLifecycleFrom carries same-session lifecycle state across controller
 // rebuilds, such as model switches that preserve the conversation.
@@ -5742,7 +5750,7 @@ func (c *Controller) Bypass() bool {
 
 // memory
 //
-// The memory snapshot, the pending turn-tail notes queue, and write serialization
+// The memory snapshot, pending standing-doc notes, and write serialization
 // live in c.memory (a memoryManager) behind its own locks, off c.mu — so a
 // memory-panel save never stalls an approval or status poll. These methods are
 // the SessionAPI surface; each is a thin delegation. See memory.go.
@@ -5772,10 +5780,9 @@ func (c *Controller) ForgetMemory(name string) error {
 	return c.memory.forget(name)
 }
 
-// QueueMemory implements memory.Queue: when the model runs the remember/forget
-// tool, the tool calls this with a note that rides the next turn so the change
-// applies this session without touching the cache-stable prefix. It also
-// refreshes the snapshot a memory panel reads.
+// QueueMemory implements memory.Queue: model remember/forget tool results are
+// already visible in the current loop, so this refreshes the background snapshot
+// that will be published in session-context on the next real user turn.
 func (c *Controller) QueueMemory(note string) {
 	c.memory.queue(note)
 }

@@ -72,6 +72,22 @@ Rules: be terse — bullet points and fragments, not prose. Preserve identifiers
 // budgets are intentionally absent: they are clipped against the final request
 // at send time and must never make compaction happen earlier than the user's
 // configured compact_ratio.
+func (a *Agent) compact(ctx context.Context, trigger, instructions string, force bool) error {
+	allowChunked := trigger == CompactionTriggerManual
+	_, err := a.compactToProjectionWithChunked(ctx, trigger, instructions, force, false, allowChunked)
+	return err
+}
+
+func (a *Agent) compactToProjection(ctx context.Context, trigger, instructions string, force, mustFree bool) (CompactionOutcome, error) {
+	return a.compactToProjectionWithChunked(ctx, trigger, instructions, force, mustFree, false)
+}
+
+func (a *Agent) compactToProjectionWithChunked(ctx context.Context, trigger, instructions string, force, mustFree, allowChunked bool) (CompactionOutcome, error) {
+	a.sess.compactionRunMu.Lock()
+	defer a.sess.compactionRunMu.Unlock()
+	return a.compactToProjectionLocked(ctx, trigger, instructions, force, mustFree, allowChunked)
+}
+
 func (a *Agent) compactTrigger() int {
 	window := a.effectiveContextWindow()
 	if a == nil || window <= 0 {
@@ -119,7 +135,7 @@ func foldEconomics(region []provider.Message) bool {
 func estimateMessagesTokens(msgs []provider.Message) int {
 	total := 0
 	for _, m := range msgs {
-		if m.LocalOnly {
+		if m.LocalOnly || IsPinnedContextRevision(m) {
 			continue
 		}
 		total += 4 // chat-message framing overhead
@@ -372,7 +388,7 @@ func (a *Agent) summaryRequest(region []provider.Message, instructions string) p
 		}
 	}
 	messages := a.normalizeModelRequestMessages(prefix)
-	messages = append(messages, provider.Message{Role: provider.RoleUser, Content: compactionInstructionWithFocus(instructions)})
+	messages = append(messages, HostGeneratedUserMessage(compactionInstructionWithFocus(instructions)))
 	var schemas []provider.ToolSchema
 	if a.svc.tools != nil {
 		schemas = a.providerToolSchemas()

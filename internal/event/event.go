@@ -277,6 +277,11 @@ type Tool struct {
 	AttemptID string
 	FileDiff
 	Profile *Profile // ToolDispatch: subagent model/effort (set for task/skill calls)
+	// Subagent outcome metadata is host/UI-only and never enters provider requests.
+	SubagentRef       string
+	SubagentStatus    string
+	SubagentErrorCode string
+	SubagentRetryable bool
 	// Execution is optional local shell metadata (ToolResult). Never sent to
 	// model providers; omitempty keeps old wire readers compatible.
 	Execution *ShellExecution
@@ -488,21 +493,6 @@ type AskAnswer struct {
 	Selected   []string
 }
 
-// CacheDiagnostics describes whether and why the cacheable prefix changed since
-// the last turn. It rides on the Usage event so every frontend can show
-// cache-churn attribution.
-type CacheDiagnostics struct {
-	PrefixHash          string
-	PrefixChanged       bool
-	PrefixChangeReasons []string // "system", "tools", "log_rewrite"
-	SystemHash          string
-	ToolsHash           string
-	LogRewriteVersion   int
-	ToolSchemaTokens    int
-	CacheMissTokens     int
-	CacheHitTokens      int
-}
-
 // FinalReadiness carries machine-readable recovery requirements on TurnDone.
 // Missing values are stable category ids; user-facing detail stays localized in
 // the frontend instead of scraping the diagnostic error string.
@@ -688,6 +678,8 @@ const (
 	ProtocolRecoveryClientToolRejected              ProtocolRecoveryKind = "client_tool_rejected_unreplayable_reasoning"
 	ProtocolRecoveryServerSearchSalvaged            ProtocolRecoveryKind = "server_search_history_salvaged"
 	ProtocolRecoveryHistoryRepaired                 ProtocolRecoveryKind = "unreplayable_history_repaired"
+	ProtocolRecoveryReasoningReplay400Detected      ProtocolRecoveryKind = "reasoning_replay_400_detected"
+	ProtocolRecoveryReasoningReplay400Recovered     ProtocolRecoveryKind = "reasoning_replay_400_recovered"
 )
 
 type ProtocolRecoveryAudit struct {

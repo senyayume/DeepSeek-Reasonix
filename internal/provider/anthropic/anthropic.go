@@ -110,10 +110,21 @@ func New(cfg provider.Config) (provider.Provider, error) {
 	effort, _ := cfg.Extra["effort"].(string)
 	effort = strings.ToLower(strings.TrimSpace(effort))
 	vision, _ := cfg.Extra["vision"].(bool)
-	// Official DeepSeek image input is pinned to one SKU. Ignore Extra["vision"]
-	// so stale config cannot send image blocks to Flash/Pro.
-	if officialDeepSeek {
-		vision = openai.IsOfficialDeepSeekVisionModel(cfg.Model)
+	modelInfo := provider.ModelInfo{ID: cfg.Model, InputModalities: []provider.ModelModality{provider.ModalityText}}
+	if cfg.ModelInfo != nil {
+		modelInfo = *cfg.ModelInfo
+		modelInfo.ID = cfg.Model
+	}
+	if cfg.ModelInfo != nil {
+		vision = modelInfo.SupportsInput(provider.ModalityImage)
+	}
+	// Official DeepSeek image input is pinned to one SKU even when metadata
+	// claims otherwise.
+	vision = openai.DeepSeekImageInputAllowed(officialDeepSeek, requestURL, cfg.Model, cfg.ModelInfo != nil, vision)
+	if vision {
+		modelInfo.InputModalities = []provider.ModelModality{provider.ModalityText, provider.ModalityImage}
+	} else if modelInfo.SupportsInput(provider.ModalityImage) {
+		modelInfo.InputModalities = []provider.ModelModality{provider.ModalityText}
 	}
 	webSearch, _ := cfg.Extra["web_search"].(bool)
 	headers, _ := cfg.Extra["headers"].(map[string]string)
@@ -149,6 +160,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		thinking:         thinking,
 		effort:           effort,
 		vision:           vision,
+		modelInfo:        modelInfo,
 		mimo:             provider.IsMiMoEndpoint(root),
 		webSearch:        webSearch,
 		headers:          cleanCustomHeaders(headers),
@@ -182,8 +194,9 @@ type client struct {
 	thinking         string // "adaptive" enables extended thinking; "" = off (config-driven)
 	effort           string // output_config.effort: low|medium|high|xhigh|max; "" = provider default
 	vision           bool   // model accepts image input — embed attached images as base64 image blocks
-	mimo             bool   // true for MiMo — upgrades legacy tuple schemas to Draft 2020-12
-	webSearch        bool   // enable server-side web_search tool (DeepSeek Anthropic API)
+	modelInfo        provider.ModelInfo
+	mimo             bool // true for MiMo — upgrades legacy tuple schemas to Draft 2020-12
+	webSearch        bool // enable server-side web_search tool (DeepSeek Anthropic API)
 	headers          map[string]string
 	authHeader       bool // send Authorization: Bearer instead of Anthropic's x-api-key header
 	defaultMaxTokens int
@@ -193,6 +206,15 @@ type client struct {
 }
 
 func (c *client) Name() string { return c.name }
+
+func (c *client) ModelInfo() provider.ModelInfo {
+	if c == nil {
+		return provider.ModelInfo{}
+	}
+	info := c.modelInfo
+	info.InputModalities = append([]provider.ModelModality(nil), info.InputModalities...)
+	return info
+}
 
 func (c *client) deepSeekThinkingEnabled() bool {
 	return c != nil && c.deepseek && c.thinking != "disabled" && c.effort != "disabled"
@@ -217,8 +239,18 @@ func (c *client) RequiresToolCallReasoning() bool {
 }
 
 func (c *client) RequiresAssistantReasoningReplay(m provider.Message) bool {
+	if c == nil || !c.deepseek {
+		return false
+	}
+	// A turn carrying provider-issued reasoning must replay it, tools or not:
+	// DeepSeek's thinking mode 400s when a stored thinking block is not passed
+	// back. Without stored reasoning there is nothing to replay — plain text
+	// turns stay out of projection so healthy histories keep their backing.
+	if strings.TrimSpace(m.ReasoningContent) != "" {
+		return true
+	}
 	activity := len(m.ToolCalls) > 0 || len(m.ServerSearch) > 0
-	return c != nil && c.deepseek && activity && (c.deepSeekThinkingEnabled() || strings.TrimSpace(m.ReasoningContent) != "")
+	return activity && c.deepSeekThinkingEnabled()
 }
 
 func (c *client) AllowsEmptyReasoningFallback() bool { return false }
@@ -336,8 +368,6 @@ func (c *client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 func (c *client) buildRequest(ctx context.Context, req provider.Request) anthRequest {
 	var system []textBlock
 	var msgs []anthMessage
-	recoveryWithoutThinking := c.missingReasoningFallback(ctx)
-
 	// appendBlocks adds blocks under role, merging into the previous message when
 	// it shares the role (keeps user/assistant strictly alternating).
 	appendBlocks := func(role string, blocks ...contentBlock) {
@@ -345,13 +375,13 @@ func (c *client) buildRequest(ctx context.Context, req provider.Request) anthReq
 			return
 		}
 		if n := len(msgs); n > 0 && msgs[n-1].Role == role {
-			msgs[n-1].Content = append(msgs[n-1].Content, blocks...)
+			msgs[n-1].Content = mergeThinkingFirst(msgs[n-1].Content, blocks)
 			return
 		}
 		msgs = append(msgs, anthMessage{Role: role, Content: blocks})
 	}
 
-	messages := c.replayMessages(req.Messages, recoveryWithoutThinking)
+	messages := c.replayMessages(req.Messages)
 	for _, m := range provider.SanitizeToolPairing(messages) {
 		switch m.Role {
 		case provider.RoleSystem:
@@ -360,7 +390,7 @@ func (c *client) buildRequest(ctx context.Context, req provider.Request) anthReq
 			}
 		case provider.RoleUser:
 			if m.Content != "" {
-				appendBlocks("user", contentBlock{Type: "text", Text: m.Content})
+				appendBlocks("user", sessionContextTextBlocks(m.Content)...)
 			}
 			if c.vision {
 				for _, ref := range m.Images {
@@ -383,12 +413,13 @@ func (c *client) buildRequest(ctx context.Context, req provider.Request) anthReq
 			appendBlocks("user", block)
 		case provider.RoleAssistant:
 			var blocks []contentBlock
-			// Replay provider reasoning before the tool_use it led to. DeepSeek uses
-			// unsigned thinking blocks and requires the reasoning from a tool-call
-			// turn in every subsequent request, even if the current request no longer
-			// declares tools or has since disabled thinking. Anthropic proper requires
-			// a signature, so reasoning without one cannot be replayed on that endpoint.
-			if block, ok := c.replayReasoningBlock(m, recoveryWithoutThinking); ok {
+			// Replay provider reasoning ahead of the content it led to. DeepSeek's
+			// thinking mode requires every historical assistant turn's thinking
+			// block back whenever the request declares tools — tool-call turn or
+			// not — even if the current request no longer declares tools or has
+			// since disabled thinking. Anthropic proper requires a signature, so
+			// reasoning without one cannot be replayed on that endpoint.
+			if block, ok := c.replayReasoningBlock(m); ok {
 				blocks = append(blocks, block)
 			}
 			blocks = appendServerSearchBlocks(blocks, m.ServerSearch)
@@ -407,28 +438,8 @@ func (c *client) buildRequest(ctx context.Context, req provider.Request) anthReq
 	}
 
 	tools := encodeAnthTools(c, req)
-
-	// Prompt-cache breakpoints (ephemeral, prefix-match). DeepSeek ignores
-	// cache_control and manages prefix caching automatically, so keep those fields
-	// off its wire entirely. Render order for native Anthropic is
-	// tools → system → messages, so a marker on the last system block caches
-	// tools+system together; with no system, mark the last tool. A marker on the
-	// last block of the last message caches the conversation prefix, accruing hits
-	// incrementally as turns are appended. Max 4 breakpoints; we use ≤2. Keep
-	// Anthropic's default 5m TTL by omitting the ttl field. Besides being cheaper
-	// than the opt-in 1h write, this keeps provider-visible request bytes stable
-	// across turns, retries, and wall-clock timing.
 	if !c.deepseek {
-		if n := len(system); n > 0 {
-			system[n-1].CacheControl = ephemeral()
-		} else if n := len(tools); n > 0 {
-			tools[n-1].CacheControl = ephemeral()
-		}
-		if n := len(msgs); n > 0 {
-			if k := len(msgs[n-1].Content); k > 0 {
-				msgs[n-1].Content[k-1].CacheControl = ephemeral()
-			}
-		}
+		markPromptCacheBreakpoints(system, tools, msgs)
 	}
 
 	maxTokens := req.MaxTokens
@@ -451,7 +462,7 @@ func (c *client) buildRequest(ctx context.Context, req provider.Request) anthReq
 	// uses type=adaptive plus display/output_config. LongCat-style compatible
 	// gateways use the simpler enabled|disabled knob and reject output_config.
 	if c.deepseek {
-		c.applyDeepSeekThinking(&r, req, recoveryWithoutThinking)
+		c.applyDeepSeekThinking(&r, req)
 	} else {
 		switch c.thinking {
 		case "adaptive":
